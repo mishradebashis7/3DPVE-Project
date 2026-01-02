@@ -23,7 +23,7 @@ with col2:
 
 st.divider()
 
-# --- Team Member 2 (Optional - Delete if solo) ---
+# --- Team Member 2 ---
 col3, col4 = st.columns([1, 3])
 with col3:
     st.image("https://cdn-icons-png.flaticon.com/512/4140/4140037.png", width=150)
@@ -37,6 +37,22 @@ with col4:
     st.markdown("[GitHub](#) | [LinkedIn](#)")
 
 st.divider()
+
+# --- Team Member 3  ---
+col3, col4 = st.columns([1, 3])
+with col3:
+    st.image("https://cdn-icons-png.flaticon.com/512/4140/4140037.png", width=150)
+with col4:
+    st.subheader("Teammate Name")
+    st.markdown("**Data Scientist / UI Designer**")
+    st.write("""
+    Focused on the user experience (UX) and financial modeling. ensured the 
+    dashboard meets the needs of enterprise IP lawyers.
+    """)
+    st.markdown("[GitHub](#) | [LinkedIn](#)")
+
+st.divider()
+
 
 # --- Project Goals ---
 st.subheader("🏆 Project Mission")
