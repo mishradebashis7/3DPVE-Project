@@ -15,11 +15,15 @@ Unlike traditional linear models, we use a **Composite Scoring System**:
 
 2.  **The Algorithm:**
     We treat the valuation as a regression problem:
-    $$ Value = \\alpha (Tech) + \\beta (Legal) + \\gamma (Market) + \epsilon $$
-    
-    * **Tech Score:** $Citations \\times 2 + Claims$
-    * **Legal Score:** $RemainingLife \\times 4$
-    * **Market Score:** $FamilySize \\times 5$
+""")
+
+# FIX: Added 'r' before the string to handle \epsilon correctly
+st.latex(r"Value = \alpha (Tech) + \beta (Legal) + \gamma (Market) + \epsilon")
+
+st.markdown("""
+    * **Tech Score:** Citations × 2 + Claims
+    * **Legal Score:** RemainingLife × 4
+    * **Market Score:** FamilySize × 5
 
 3.  **The Output:**
     A unified financial metric (in Euros) used for M&A due diligence.
