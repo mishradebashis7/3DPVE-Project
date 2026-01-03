@@ -33,7 +33,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- SIDEBAR CONTROLS ---
+# --- SIDEBAR INPUTS ---
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2620/2620603.png", width=80)
     st.title("3D-PVE Control")
@@ -42,13 +42,7 @@ with st.sidebar:
     st.subheader("⚙️ Parameters")
     portfolio_size = st.slider("Portfolio Size", 50, 500, 150)
     market_volatility = st.selectbox("Market Condition", ["Stable", "Recession", "High Growth"])
-    
-    st.divider()
-    st.info(f"**Status:** System Ready\n\n**Mode:** {market_volatility}")
-    
-    if st.button("🔄 Re-Run Simulation", type="primary"):
-        st.cache_data.clear()
-        st.rerun()
+
 # --- DATA LOGIC ---
 import numpy as np
 from src.sql_client import DataManager
@@ -65,10 +59,12 @@ def load_data(n, vol, mode):
         SELECT 
             t1.appln_id, t1.appln_filing_year, t1.docdb_family_size, 
             t2.publn_claims,
-            t3.ipc_class_symbol
+            t3.ipc_class_symbol,
+            t4.appln_abstract
         FROM tls201_appln AS t1
         INNER JOIN tls211_pat_publn AS t2 ON t1.appln_id = t2.appln_id
         LEFT JOIN tls209_appln_ipc AS t3 ON t1.appln_id = t3.appln_id
+        LEFT JOIN tls203_appln_abstr AS t4 ON t1.appln_id = t4.appln_id
         WHERE t1.appln_filing_year > 2018
         LIMIT {n}
         """
@@ -184,6 +180,24 @@ total_std = df['Standard_Value'].sum()
 total_ai = df['AI_Value'].sum()
 delta = total_ai - total_std
 
+# --- SIDEBAR LIVE FEEDBACK (Place after data is loaded) ---
+with st.sidebar:
+    st.divider()
+    st.subheader("📊 Engine Status")
+    
+    # These metrics now have access to 'df' and 'total_ai'
+    top_sector = df.groupby('Sector')['AI_Value'].sum().idxmax()
+    impact_pct = ((total_ai / total_std) - 1) * 100
+    
+    st.write(f"**Dominant Sector:** \n{top_sector}")
+    st.write(f"**AI Valuation Shift:** {impact_pct:+.1f}%")
+    
+    st.info(f"**Status:** System Ready\n\n**Mode:** {market_volatility}")
+    
+    if st.button("🔄 Re-Run Simulation", type="primary"):
+        st.cache_data.clear()
+        st.rerun()
+
 # --- DASHBOARD HEADER ---
 st.title("💎 3D-PVE Command Center")
 st.markdown("### Enterprise Patent Valuation Engine")
@@ -209,216 +223,243 @@ with col4:
 
 st.divider()
 
+
 # --- CREATE THE 7 TABS ---
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "📊 3D Map", 
-    "🔬 Inspector", 
-    "🌊 Valuation Bridge", 
-    "📈 Financials", 
-    "🧠 AI Logic", 
-    "📋 Data",
-    "⚖️ Model Comparison"
-])
+# --- GLOBAL ASSET SELECTION (Place this ABOVE the navigation logic) ---
+st.write("### 🎯 Active Asset Selection")
+col_sel_1, col_sel_2 = st.columns(2)
 
-# --- TAB 1: 3D Visualization ---
-with tab1:
-    st.subheader("Global Portfolio Risk Analysis")
-    col_t1_1, col_t1_2 = st.columns([3, 1])
-    
-    with col_t1_1:
-        # The 3D Scatter Plot
-        fig_3d = px.scatter_3d(
-            df, 
-            x='Legal_Score', 
-            y='Tech_Score', 
-            z='Market_Score',
-            color='Sector', 
-            size='Citations', 
-            hover_name='Patent_ID',
-            symbol='Sector',
-            color_discrete_sequence=px.colors.qualitative.Bold,
-            title="3D Risk Landscape (Color=Sector, Size=Citations)"
-        )
-        fig_3d.update_layout(height=600, margin=dict(l=0, r=0, b=0, t=30))
-        st.plotly_chart(fig_3d, use_container_width=True)
-        
-    with col_t1_2:
-        st.info("💡 **Strategy Insight:**")
-        st.markdown("""
-        * **Top-Right Cluster:** \n  High Value Assets (Keep/Invest)
-        * **Bottom-Left Cluster:** \n  Toxic Assets (Prune/Abandon)
-        * **Top-Left Cluster:** \n  High Tech / Low Market (License Out)
-        """)
+with col_sel_1:
+    available_sectors = sorted(df['Sector'].unique())
+    selected_sector = st.selectbox("1️⃣ Filter by Industry Sector", available_sectors)
+    sector_df = df[df['Sector'] == selected_sector].drop_duplicates(subset='Patent_ID')
 
-# --- TAB 2: Asset Inspector ---
-with tab2:
-    st.subheader("Deep Dive Asset Audit")
+with col_sel_2:
+    asset_options = sector_df.apply(lambda x: f"ID: {x['Patent_ID']} | {str(x.get('appln_abstract', ''))[:30]}...", axis=1).tolist()
+    selected_label = st.selectbox("2️⃣ Select Specific Patent", asset_options)
     
-    col_ins_1, col_ins_2 = st.columns([1, 2])
-    
-    with col_ins_1:
-        # Selector
-        selected_id = st.selectbox("🔎 Select Asset ID:", df['Patent_ID'].unique())
-        asset = df[df['Patent_ID'] == selected_id].iloc[0]
+    # Safe ID Extraction (treat as string)
+    selected_id_str = selected_label.split("|")[0].replace("ID:", "").strip()
+    asset = sector_df[sector_df['Patent_ID'].astype(str) == selected_id_str].iloc[0]
+    selected_id = selected_id_str
+
+st.divider()
+
+# --- PERSISTENT NAVIGATION (Replaces st.tabs) ---
+if 'active_tab' not in st.session_state:
+    st.session_state.active_tab = "📊 3D Map"
+
+nav_options = ["📊 3D Map", "🔬 Inspector", "🌊 Valuation Bridge", "📈 Financials", "🧠 AI Logic", "📋 Data", "⚖️ Model Comparison"]
+selected_nav = st.radio("Navigation", nav_options, index=nav_options.index(st.session_state.active_tab), 
+                        horizontal=True, label_visibility="collapsed")
+st.session_state.active_tab = selected_nav
+
+if selected_nav == "📊 3D Map":
+    # --- TAB 1: 3D Visualization ---
+        st.subheader("Global Portfolio Risk Analysis")
+        col_t1_1, col_t1_2 = st.columns([3, 1])
         
-        # AI Recommendation Logic
-        if asset['AI_Value'] > asset['Standard_Value'] * 1.15:
-            st.success(f"💎 **STRONG BUY**\n\nAI sees hidden value in {asset['Sector']} sector.")
-        elif asset['AI_Value'] < asset['Standard_Value'] * 0.85:
-            st.error(f"🔻 **RISK ALERT**\n\nHigh legal risk detected. Consider abandonment.")
-        else:
-            st.warning(f"🔸 **HOLD**\n\nFairly valued asset.")
+        with col_t1_1:
+            # The 3D Scatter Plot
+            fig_3d = px.scatter_3d(
+                df, 
+                x='Legal_Score', 
+                y='Tech_Score', 
+                z='Market_Score',
+                color='Sector', 
+                size='Citations', 
+                hover_name='Patent_ID',
+                symbol='Sector',
+                color_discrete_sequence=px.colors.qualitative.Bold,
+                title="3D Risk Landscape (Color=Sector, Size=Citations)"
+            )
+            fig_3d.update_layout(height=600, margin=dict(l=0, r=0, b=0, t=30))
+            st.plotly_chart(fig_3d, width='stretch')
             
+        with col_t1_2:
+            st.info("💡 **Strategy Insight:**")
+            st.markdown("""
+            * **Top-Right Cluster:** \n  High Value Assets (Keep/Invest)
+            * **Bottom-Left Cluster:** \n  Toxic Assets (Prune/Abandon)
+            * **Top-Left Cluster:** \n  High Tech / Low Market (License Out)
+            """)
+
+elif selected_nav == "🔬 Inspector":
+    # --- TAB 2: Asset Inspector ---
+        st.subheader("🔎 Deep Dive Asset Audit")
+    
+        # --- STEP 2: THE LAYOUT ---
+        col_ins_1, col_ins_2 = st.columns([1.2, 1.8])
+        
+        with col_ins_1:
+            # Your original AI Recommendation Logic
+            if asset['AI_Value'] > asset['Standard_Value'] * 1.15:
+                st.success(f"💎 **STRONG BUY**\n\nHigh-potential innovation detected.")
+            elif asset['AI_Value'] < asset['Standard_Value'] * 0.85:
+                st.error(f"🔻 **RISK ALERT**\n\nValue dilution/Legal risk detected.")
+            else:
+                st.warning(f"🔸 **HOLD**\n\nAsset performing as expected.")
+                
+            # Real Asset Metadata
+            st.markdown("### Asset Identity")
+            st.write(f"**Industry:** {asset['Sector']}")
+            st.write(f"**Legal Expiry:** {int(asset['Remaining_Life'])} Yrs")
+            
+            # REAL Abstract (Replacing the simulated tags)
+            st.write("**PATSTAT Abstract:**")
+            with st.container(border=True):
+                abstract_txt = asset.get('appln_abstract', "No description available in current dataset.")
+                st.caption(f"_{abstract_txt}_")
+    
+        with col_ins_2:
+            # Your original Radar Chart logic (It's excellent, keep it!)
+            fig_radar = go.Figure()
+            categories = ['Legal Stability', 'Tech Quality', 'Market Fit']
+            
+            fig_radar.add_trace(go.Scatterpolar(
+                r=[asset['Legal_Score'], asset['Tech_Score'], asset['Market_Score']],
+                theta=categories, fill='toself', name='This Asset', line_color='#00CC96'
+            ))
+            
+            fig_radar.add_trace(go.Scatterpolar(
+                r=[55, 60, 50], theta=categories, name='Industry Avg',
+                line_color='grey', line_dash='dot'
+            ))
+            
+            fig_radar.update_layout(
+                polar=dict(radialaxis=dict(visible=True, range=[0, 100])), 
+                title=f"Efficiency Profile: {selected_id}",
+                height=400,
+                margin=dict(l=40, r=40, t=40, b=40)
+            )
+            st.plotly_chart(fig_radar, width='stretch')
+    
+        # Final Metric Row for that "C-Suite" look
         st.markdown("---")
-        st.write(f"**Sector:** {asset['Sector']}")
-        st.write(f"**Legal Expiry:** {int(asset['Remaining_Life'])} Yrs")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Tech Quality", f"{asset['Tech_Score']:.1f}")
+        m2.metric("Legal Score", f"{asset['Legal_Score']:.1f}")
+        m3.metric("Standard Val", f"${asset['Standard_Value']:,.0f}")
+        m4.metric("AI-Adjusted Val", f"${asset['AI_Value']:,.0f}", 
+                  delta=f"{((asset['AI_Value']/asset['Standard_Value'])-1)*100:.1f}%")
+
+elif selected_nav == "🌊 Valuation Bridge":
+    # --- TAB 3: Valuation Bridge (Updated for Real Risk) ---
+        st.subheader("Valuation Bridge Analysis (Waterfall)")
         
-        # Simulated NLP Tags (The "Illusion" of Text Analysis)
-        tags = ["Generative_AI", "Neural_Nets", "Transformers"] if "AI" in asset['Sector'] else ["Solid_State", "Lithium_Ion", "Grid_Storage"]
-        st.write("**AI-Detected Keywords:**")
-        st.caption(f"`{tags[0]}`  `{tags[1]}`  `{tags[2]}`")
-
-    with col_ins_2:
-        # Radar Chart: Asset vs Industry Average
-        fig_radar = go.Figure()
-        categories = ['Legal Stability', 'Tech Quality', 'Market Fit']
+        # 1. Base Valuation
+        base = asset['Standard_Value']
         
-        # The Asset Trace
-        fig_radar.add_trace(go.Scatterpolar(
-            r=[asset['Legal_Score'], asset['Tech_Score'], asset['Market_Score']],
-            theta=categories, fill='toself', name='This Asset', line_color='#00CC96'
-        ))
-        
-        # The Industry Average Trace (Simulated)
-        fig_radar.add_trace(go.Scatterpolar(
-            r=[55, 60, 50], theta=categories, name='Industry Avg',
-            line_color='grey', line_dash='dot'
-        ))
-        
-        fig_radar.update_layout(
-            polar=dict(radialaxis=dict(visible=True, range=[0, 100])), 
-            title=f"Asset Profile: {selected_id}",
-            height=450
-        )
-        st.plotly_chart(fig_radar, use_container_width=True)
-
-# --- TAB 3: Valuation Bridge (Updated for Real Risk) ---
-with tab3:
-    st.subheader("Valuation Bridge Analysis (Waterfall)")
-    
-    # 1. Base Valuation
-    base = asset['Standard_Value']
-    
-    # 2. Logic: Real Risk vs. Simulated Premium
-    # If in Live Mode, check for specific legal event codes
-    legal_risk_deduction = 0
-    if "Live" in current_mode:
-        # Example: Deduction if a 'LAPS' (Lapse) or 'WDRI' (Withdrawal) event exists
-        # In a full implementation, you'd join with tls231
-        legal_risk_deduction = -(base * 0.40) if asset.get('Event_Code') in ['LAPS', 'WDRI'] else 0
-    else:
-        # Use your existing scoring logic for Mock/Static
-        legal_risk_deduction = (asset['Legal_Score'] - 50) * (base * 0.05) / 10 
-
-    tech_premium = (asset['Tech_Score'] - 50) * (base * 0.08) / 10
-    market_fit = (asset['Market_Score'] - 50) * (base * 0.1) / 10
-    
-    # 3. Volatility Adjustment (from your sidebar)
-    vol_adj = asset['AI_Value'] - (base + legal_risk_deduction + tech_premium + market_fit)
-    
-    # 4. Final Calculated Value
-    final = asset['AI_Value']
-
-    fig_waterfall = go.Figure(go.Waterfall(
-        name = "Valuation Adjustments", orientation = "v",
-        measure = ["relative", "relative", "relative", "relative", "relative", "total"],
-        x = ["Standard Base", "Legal Event Risk", "Tech Premium", "Market Fit", "Market Volatility", "Final AI Value"],
-        y = [base, legal_risk_deduction, tech_premium, market_fit, vol_adj, final],
-        connector = {"line":{"color":"rgb(63, 63, 63)"}},
-        decreasing = {"marker":{"color":"#EF553B"}},
-        increasing = {"marker":{"color":"#00CC96"}},
-        totals = {"marker":{"color":"#2f75db"}}
-    ))
-    
-    fig_waterfall.update_layout(title=f"Valuation Walk for Asset {selected_id}", height=500)
-    st.plotly_chart(fig_waterfall, use_container_width=True)
-
-# --- TAB 4: Financial Projections ---
-with tab4:
-    st.subheader("10-Year NPV Projection")
-    
-    years = list(range(2024, 2034))
-    # Growth rate depends on the volatility setting
-    rate = 1.08 if market_volatility == "High Growth" else (0.95 if market_volatility == "Recession" else 1.03)
-    
-    # Create projection data
-    proj_values = [total_ai * (rate ** i) for i in range(len(years))]
-    
-    fig_line = px.line(x=years, y=proj_values, markers=True, title=f"Portfolio Value Forecast ({market_volatility} Scenario)")
-    fig_line.update_traces(line_color='#00CC96', line_width=4)
-    fig_line.update_layout(yaxis_title="Portfolio Value (€)", xaxis_title="Year")
-    
-    st.plotly_chart(fig_line, use_container_width=True)
-
-# --- TAB 5: AI Explainability ---
-with tab5:
-    st.subheader("Model Explainability (XAI)")
-    st.write("Relative importance of features in the Ridge Regression Model.")
-    
-    feat_imp = pd.DataFrame({
-        'Feature': ['Forward Citations', 'Family Size', 'Remaining Life', 'Claims Count', 'Backward Citations'],
-        'Weight': [0.45, 0.25, 0.15, 0.10, 0.05]
-    })
-    
-    fig_bar = px.bar(feat_imp, x='Weight', y='Feature', orientation='h', 
-                     color='Weight', title="Feature Importance Weights",
-                     color_continuous_scale="Blues")
-    st.plotly_chart(fig_bar, use_container_width=True)
-    
-    st.info("The model places the highest weight on **Forward Citations**, indicating that technological impact is the primary driver of value in this sector.")
-
-# --- TAB 6: Raw Data ---
-with tab6:
-    st.subheader("Database View")
-    st.dataframe(df, use_container_width=True)
-
-# --- TAB 7: Model Comparison (The "Missing" Chart) ---
-with tab7:
-    st.subheader("Impact of Machine Learning on Portfolio Value")
-    
-    col_comp_1, col_comp_2 = st.columns([2, 1])
-    
-    with col_comp_1:
-        # Side-by-Side Bar Chart
-        fig_comp = go.Figure(data=[
-            go.Bar(name='Traditional (Manual)', x=['Valuation Method'], y=[total_std], 
-                   marker_color='#EF553B', text=f"€{total_std/1e6:.1f}M", textposition='auto'),
-            go.Bar(name='AI-Powered (3D-PVE)', x=['Valuation Method'], y=[total_ai], 
-                   marker_color='#00CC96', text=f"€{total_ai/1e6:.1f}M", textposition='auto')
-        ])
-        
-        fig_comp.update_layout(
-            barmode='group', 
-            height=400, 
-            title="Total Portfolio Value Comparison",
-            yaxis_title="Value (€)",
-            showlegend=True
-        )
-        st.plotly_chart(fig_comp, use_container_width=True)
-        
-    with col_comp_2:
-        st.info("💡 **Why the difference?**")
-        
-        # Dynamic text based on the result
-        if total_ai > total_std:
-            reason = "The AI detected hidden value in **High-Tech assets** that traditional rules undervalued."
+        # 2. Logic: Real Risk vs. Simulated Premium
+        # If in Live Mode, check for specific legal event codes
+        legal_risk_deduction = 0
+        if "Live" in current_mode:
+            # Example: Deduction if a 'LAPS' (Lapse) or 'WDRI' (Withdrawal) event exists
+            # In a full implementation, you'd join with tls231
+            legal_risk_deduction = -(base * 0.40) if asset.get('Event_Code') in ['LAPS', 'WDRI'] else 0
         else:
-            reason = "The AI applied a discount due to **Market Volatility** and **Legal Risks** that manual rules ignored."
-            
-        st.markdown(f"""
-        **The Traditional Model** uses fixed rules (e.g., *"Every citation is worth €1000"*).
+            # Use your existing scoring logic for Mock/Static
+            legal_risk_deduction = (asset['Legal_Score'] - 50) * (base * 0.05) / 10 
+    
+        tech_premium = (asset['Tech_Score'] - 50) * (base * 0.08) / 10
+        market_fit = (asset['Market_Score'] - 50) * (base * 0.1) / 10
         
-        **The AI Model** adjusted the price because:
-        * {reason}
-        * Sector premiums were applied to **{df.groupby('Sector')['AI_Value'].sum().idxmax()}**.
-        """)
+        # 3. Volatility Adjustment (from your sidebar)
+        vol_adj = asset['AI_Value'] - (base + legal_risk_deduction + tech_premium + market_fit)
+        
+        # 4. Final Calculated Value
+        final = asset['AI_Value']
+    
+        fig_waterfall = go.Figure(go.Waterfall(
+            name = "Valuation Adjustments", orientation = "v",
+            measure = ["relative", "relative", "relative", "relative", "relative", "total"],
+            x = ["Standard Base", "Legal Event Risk", "Tech Premium", "Market Fit", "Market Volatility", "Final AI Value"],
+            y = [base, legal_risk_deduction, tech_premium, market_fit, vol_adj, final],
+            connector = {"line":{"color":"rgb(63, 63, 63)"}},
+            decreasing = {"marker":{"color":"#EF553B"}},
+            increasing = {"marker":{"color":"#00CC96"}},
+            totals = {"marker":{"color":"#2f75db"}}
+        ))
+        
+        fig_waterfall.update_layout(title=f"Valuation Walk for Asset {selected_id}", height=500)
+        st.plotly_chart(fig_waterfall, width='stretch')
+
+elif selected_nav == "📈 Financials":
+    # --- TAB 4: Financial Projections ---
+        st.subheader("10-Year NPV Projection")
+        
+        years = list(range(2024, 2034))
+        # Growth rate depends on the volatility setting
+        rate = 1.08 if market_volatility == "High Growth" else (0.95 if market_volatility == "Recession" else 1.03)
+        
+        # Create projection data
+        proj_values = [total_ai * (rate ** i) for i in range(len(years))]
+        
+        fig_line = px.line(x=years, y=proj_values, markers=True, title=f"Portfolio Value Forecast ({market_volatility} Scenario)")
+        fig_line.update_traces(line_color='#00CC96', line_width=4)
+        fig_line.update_layout(yaxis_title="Portfolio Value (€)", xaxis_title="Year")
+        
+        st.plotly_chart(fig_line, width='stretch')
+
+elif selected_nav == "🧠 AI Logic":
+    # --- TAB 5: AI Explainability ---
+        st.subheader("Model Explainability (XAI)")
+        st.write("Relative importance of features in the Ridge Regression Model.")
+        
+        feat_imp = pd.DataFrame({
+            'Feature': ['Forward Citations', 'Family Size', 'Remaining Life', 'Claims Count', 'Backward Citations'],
+            'Weight': [0.45, 0.25, 0.15, 0.10, 0.05]
+        })
+        
+        fig_bar = px.bar(feat_imp, x='Weight', y='Feature', orientation='h', 
+                         color='Weight', title="Feature Importance Weights",
+                         color_continuous_scale="Blues")
+        st.plotly_chart(fig_bar, width='stretch')
+        
+        st.info("The model places the highest weight on **Forward Citations**, indicating that technological impact is the primary driver of value in this sector.")
+
+elif selected_nav == "📋 Data":
+    # --- TAB 6: Raw Data ---
+        st.subheader("Database View")
+        st.dataframe(df, width='stretch')
+
+elif selected_nav == "⚖️ Model Comparison":
+    # --- TAB 7: Model Comparison (The "Missing" Chart) ---
+        st.subheader("Impact of Machine Learning on Portfolio Value")
+        
+        col_comp_1, col_comp_2 = st.columns([2, 1])
+        
+        with col_comp_1:
+            # Side-by-Side Bar Chart
+            fig_comp = go.Figure(data=[
+                go.Bar(name='Traditional (Manual)', x=['Valuation Method'], y=[total_std], 
+                       marker_color='#EF553B', text=f"€{total_std/1e6:.1f}M", textposition='auto'),
+                go.Bar(name='AI-Powered (3D-PVE)', x=['Valuation Method'], y=[total_ai], 
+                       marker_color='#00CC96', text=f"€{total_ai/1e6:.1f}M", textposition='auto')
+            ])
+            
+            fig_comp.update_layout(
+                barmode='group', 
+                height=400, 
+                title="Total Portfolio Value Comparison",
+                yaxis_title="Value (€)",
+                showlegend=True
+            )
+            st.plotly_chart(fig_comp, width='stretch')
+            
+        with col_comp_2:
+            st.info("💡 **Why the difference?**")
+            
+            # Dynamic text based on the result
+            if total_ai > total_std:
+                reason = "The AI detected hidden value in **High-Tech assets** that traditional rules undervalued."
+            else:
+                reason = "The AI applied a discount due to **Market Volatility** and **Legal Risks** that manual rules ignored."
+                
+            st.markdown(f"""
+            **The Traditional Model** uses fixed rules (e.g., *"Every citation is worth €1000"*).
+            
+            **The AI Model** adjusted the price because:
+            * {reason}
+            * Sector premiums were applied to **{df.groupby('Sector')['AI_Value'].sum().idxmax()}**.
+            """)
