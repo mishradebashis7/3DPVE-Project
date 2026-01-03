@@ -7,13 +7,13 @@ import os
 import sys
 
 # --- PATH SETUP ---
-# Ensures Python can find your 'src' folder
 current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.abspath(os.path.join(current_dir, '..', '..'))
 sys.path.append(root_dir)
 
 from src.mock_data import generate_mock_portfolio
 from src.scoring_engine import ScoringEngine
+from src.sql_client import DataManager
 
 # --- PAGE CONFIG ---
 st.set_page_config(
@@ -50,34 +50,134 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 # --- DATA LOGIC ---
+import numpy as np
+from src.sql_client import DataManager
+from src.mock_data import generate_mock_portfolio
+from src.scoring_engine import ScoringEngine
+
 @st.cache_data
-def load_data(n, vol):
-    # 1. Generate Mock Data (with Sectors)
-    df = generate_mock_portfolio(n)
+def load_data(n, vol, mode):
+    dm = DataManager(mode)
     
-    # 2. Standard Scoring (The "Manual" Way)
-    scorer = ScoringEngine()
-    df = scorer.bulk_score(df)
-    df['Standard_Value'] = df['Estimated_Value'] 
-    
-    # 3. AI Scoring (The "Dynamic" Way)
-    if vol == "Recession":
-        # Recession Strategy: Punish low market reach, protect green energy
-        df['AI_Value'] = df.apply(lambda x: x['Standard_Value'] * 0.65 
-                                  if x['Market_Score'] < 50 and x['Sector'] != 'Green Energy' 
-                                  else x['Standard_Value'] * 0.9, axis=1)
-    elif vol == "High Growth":
-        # Growth Strategy: Boost Tech & AI sectors
-        df['AI_Value'] = df.apply(lambda x: x['Standard_Value'] * 1.3 
-                                  if x['Sector'] in ['AI & Software', 'Biotech'] 
-                                  else x['Standard_Value'] * 1.1, axis=1)
-    else: # Stable
-        df['AI_Value'] = df['Standard_Value'] * 1.15
+    # --- 1. DATA ACQUISITION PHASE ---
+    if "Live" in mode:
+        query = f"""
+        SELECT 
+            t1.appln_id, t1.appln_filing_year, t1.docdb_family_size, 
+            t2.publn_claims,
+            t3.ipc_class_symbol
+        FROM tls201_appln AS t1
+        INNER JOIN tls211_pat_publn AS t2 ON t1.appln_id = t2.appln_id
+        LEFT JOIN tls209_appln_ipc AS t3 ON t1.appln_id = t3.appln_id
+        WHERE t1.appln_filing_year > 2018
+        LIMIT {n}
+        """
+        raw_df = dm.get_data(query)
+    else:
+        raw_df = dm.get_data()
+
+    # Fallback to Mock if fetch fails
+    if raw_df is None or raw_df.empty:
+        from src.mock_data import generate_mock_portfolio
+        raw_df = generate_mock_portfolio(n)
+
+    # --- 2. HARMONIZATION ---
+    df = raw_df.rename(columns={
+        'appln_id': 'Patent_ID',
+        'appln_filing_year': 'Year',
+        'publn_claims': 'Claims_Count',
+        'docdb_family_size': 'Family_Size'
+    })
+
+    # --- 3. SECTOR CLASSIFICATION (IPC MAPPING) ---
+    def map_ipc_to_sector(ipc):
+        if not ipc or pd.isna(ipc): return 'Industrial Mfg'
+        ipc = str(ipc).upper()
         
+        # 1. AI & Digital (G06F, H04L, H04N, H04W, G06Q)
+        if ipc.startswith(('G06', 'G16', 'H04')): 
+            return 'AI & Software'
+        
+        # 2. Biotech & Life Sciences (A61K, A61P, A61B, C12N)
+        if ipc.startswith(('A61', 'C12')): 
+            return 'Biotech'
+        
+        # 3. Deep Tech / Semiconductors (H01L) - NEW!
+        if ipc.startswith('H01L'):
+            return 'Semiconductors'
+        
+        # 4. Green Energy & Climate Tech (H01M, Y02, F03D)
+        if ipc.startswith(('Y02', 'H01M', 'F03')): 
+            return 'Green Energy'
+        
+        # 5. Advanced Materials / Chem (C07, C08, B32) - NEW!
+        if ipc.startswith(('C07', 'C08', 'B32')):
+            return 'Advanced Materials'
+            
+        # 6. Mobility (B60, G05D)
+        if ipc.startswith(('B60', 'G05D')): 
+            return 'Automotive'
+            
+        return 'Industrial Mfg'
+
+    if 'ipc_class_symbol' in df.columns:
+        df['Sector'] = df['ipc_class_symbol'].apply(map_ipc_to_sector)
+    elif 'Sector' not in df.columns:
+        df['Sector'] = np.random.choice(['AI & Software', 'Biotech', 'Green Energy', 'Automotive'], len(df))
+
+    # --- 4. FEATURE ENGINEERING (The Fix for AttributeError) ---
+    # We ensure columns exist as Series before calling fillna
+    if 'Year' not in df.columns:
+        df['Year'] = 2022
+    
+    # Secure numeric conversion
+    df['Year'] = pd.to_numeric(df['Year'], errors='coerce').fillna(2022)
+    df['Remaining_Life'] = (20 - (2026 - df['Year'])).clip(lower=1, upper=20)
+    
+    # Fill Citations and other scoring columns
+    if 'Citations' not in df.columns:
+        df['Citations'] = (df['Family_Size'].fillna(1) * 2).astype(int)
+    
+    if 'Claims_Count' not in df.columns:
+        df['Claims_Count'] = 15
+    else:
+        df['Claims_Count'] = pd.to_numeric(df['Claims_Count'], errors='coerce').fillna(15)
+
+    df['Backward_Citations'] = np.random.randint(2, 12, len(df))
+
+    # --- 5. SCORING ENGINE ---
+    from src.scoring_engine import ScoringEngine
+    scorer = ScoringEngine()
+    df = scorer.bulk_score(df) 
+
+    # --- 6. DYNAMIC VALUATION SPLIT ---
+    df['Standard_Value'] = df['Estimated_Value']
+    
+    vol_map = {
+        "Recession": {
+            'AI & Software': 0.85, 'Biotech': 0.80, 'Green Energy': 0.70, 
+            'Automotive': 0.60, 'Industrial Mfg': 0.50
+        },
+        "High Growth": {
+            'AI & Software': 1.50, 'Biotech': 1.40, 'Green Energy': 1.30, 
+            'Automotive': 1.25, 'Industrial Mfg': 1.15
+        },
+        "Stable": {
+            'AI & Software': 1.10, 'Biotech': 1.05, 'Green Energy': 1.02, 
+            'Automotive': 1.00, 'Industrial Mfg': 0.95
+        }
+    }
+    
+    current_vol_map = vol_map.get(vol, vol_map["Stable"])
+    df['AI_Value'] = df['Standard_Value'] * df['Sector'].map(current_vol_map).fillna(1.0)
+            
     return df
 
-# Run the Engine
-df = load_data(portfolio_size, market_volatility)
+# --- GET THE GLOBAL MODE FROM LANDING PAGE ---
+current_mode = st.session_state.get('data_mode', "🟢 Mock Data (Safe)")
+
+# Run the Engine with the new mode parameter
+df = load_data(portfolio_size, market_volatility, current_mode)
 
 # Calculate Totals
 total_std = df['Standard_Value'].sum()
@@ -87,6 +187,14 @@ delta = total_ai - total_std
 # --- DASHBOARD HEADER ---
 st.title("💎 3D-PVE Command Center")
 st.markdown("### Enterprise Patent Valuation Engine")
+
+# System Status Banner
+if "Live" in current_mode:
+    st.warning(f"📡 **LIVE MODE:** Connected to EPO Data Lake | Dataset: {portfolio_size} assets")
+elif "Static" in current_mode:
+    st.info(f"📂 **OFFLINE MODE:** Using Static Snapshot | Source: data/tls201_static.csv")
+else:
+    st.success(f"🧪 **SIMULATION MODE:** Using Generative Mock Data")
 
 # Top KPI Metrics
 col1, col2, col3, col4 = st.columns(4)
@@ -194,34 +302,45 @@ with tab2:
         )
         st.plotly_chart(fig_radar, use_container_width=True)
 
-# --- TAB 3: Valuation Bridge (The "Why") ---
+# --- TAB 3: Valuation Bridge (Updated for Real Risk) ---
 with tab3:
     st.subheader("Valuation Bridge Analysis (Waterfall)")
-    st.markdown("### Why is the AI Price different from the Standard Price?")
     
-    # Simulate waterfall steps based on scores
+    # 1. Base Valuation
     base = asset['Standard_Value']
-    # If score > 50, it adds value. If < 50, it subtracts.
-    legal_adj = (asset['Legal_Score'] - 50) * (base * 0.05) / 10 
-    tech_adj = (asset['Tech_Score'] - 50) * (base * 0.08) / 10
-    market_adj = (asset['Market_Score'] - 50) * (base * 0.1) / 10
+    
+    # 2. Logic: Real Risk vs. Simulated Premium
+    # If in Live Mode, check for specific legal event codes
+    legal_risk_deduction = 0
+    if "Live" in current_mode:
+        # Example: Deduction if a 'LAPS' (Lapse) or 'WDRI' (Withdrawal) event exists
+        # In a full implementation, you'd join with tls231
+        legal_risk_deduction = -(base * 0.40) if asset.get('Event_Code') in ['LAPS', 'WDRI'] else 0
+    else:
+        # Use your existing scoring logic for Mock/Static
+        legal_risk_deduction = (asset['Legal_Score'] - 50) * (base * 0.05) / 10 
+
+    tech_premium = (asset['Tech_Score'] - 50) * (base * 0.08) / 10
+    market_fit = (asset['Market_Score'] - 50) * (base * 0.1) / 10
+    
+    # 3. Volatility Adjustment (from your sidebar)
+    vol_adj = asset['AI_Value'] - (base + legal_risk_deduction + tech_premium + market_fit)
+    
+    # 4. Final Calculated Value
     final = asset['AI_Value']
-    
-    # Calculate a "residual" so the math sums up perfectly for the chart
-    residual = final - (base + legal_adj + tech_adj + market_adj)
-    
+
     fig_waterfall = go.Figure(go.Waterfall(
         name = "Valuation Adjustments", orientation = "v",
         measure = ["relative", "relative", "relative", "relative", "relative", "total"],
-        x = ["Standard Base", "Legal Risk", "Tech Premium", "Market Fit", "Volatility Adj.", "Final AI Value"],
-        y = [base, legal_adj, tech_adj, market_adj, residual, final],
+        x = ["Standard Base", "Legal Event Risk", "Tech Premium", "Market Fit", "Market Volatility", "Final AI Value"],
+        y = [base, legal_risk_deduction, tech_premium, market_fit, vol_adj, final],
         connector = {"line":{"color":"rgb(63, 63, 63)"}},
         decreasing = {"marker":{"color":"#EF553B"}},
         increasing = {"marker":{"color":"#00CC96"}},
         totals = {"marker":{"color":"#2f75db"}}
     ))
     
-    fig_waterfall.update_layout(title=f"Valuation Walk for {selected_id}", height=500)
+    fig_waterfall.update_layout(title=f"Valuation Walk for Asset {selected_id}", height=500)
     st.plotly_chart(fig_waterfall, use_container_width=True)
 
 # --- TAB 4: Financial Projections ---

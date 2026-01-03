@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# Data (We don't want to push 500MB of PATSTAT data)
+data/static_portfolio.csv
+*.csv
+
+# Streamlit/Notebooks
+.streamlit/config.toml
+.ipynb_checkpoints/
